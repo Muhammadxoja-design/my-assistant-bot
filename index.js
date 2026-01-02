@@ -1189,9 +1189,11 @@ const PORT = parseInt(process.env.PORT || "3000", 10);
   try {
     await ensureDataFile();
 
-    await bot.launch({ dropPendingUpdates: true }).catch((e) => {
-      console.error("bot.launch failed:", e?.message || e);
-      throw e;
+    await bot.launch({
+      webhook: {
+        domain: "https://my-assistant-bot-qsfa.onrender.com",
+        port: PORT,
+      },
     });
 
     app.listen(PORT, () => {
