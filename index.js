@@ -1,4 +1,6 @@
-// index.js — yangilangan va takomillashtirilgan versiya
+// index.fixed.js — patched version with defensive DB normalization,
+// stricter step handling, and safer save/load semantics.
+
 import { Telegraf } from "telegraf";
 import axios from "axios";
 import fs from "fs/promises";
@@ -23,11 +25,11 @@ const DELETED_GROUP_ID = process.env.DELETED_GROUP_ID
   : "";
 const AI_ENABLED = process.env.AI_ENABLED === "true";
 const ENABLE_SELF_PING = process.env.ENABLE_SELF_PING === "true";
-const SELF_PING_URL = process.env.SELF_PING_URL || ""; // <-- set to your public URL (e.g. https://my-service.onrender.com/health)
+const SELF_PING_URL = process.env.SELF_PING_URL || "";
 const SELF_PING_INTERVAL_MS = parseInt(
   process.env.SELF_PING_INTERVAL_MS || "240000",
   10
-); // default 4 min
+);
 
 // Basic env check
 if (!BOT_TOKEN || !ADMIN_ID) {
@@ -42,7 +44,29 @@ console.log("AI_ENABLED =", AI_ENABLED);
 
 const bot = new Telegraf(BOT_TOKEN);
 
-// Ensure data directory & DB file exist
+// -------------------- DB helpers --------------------
+function normalizeDBShape(parsed) {
+  // Ensure the DB always has the expected structure and types
+  const db = {};
+  db.users =
+    typeof parsed.users === "object" && parsed.users !== null
+      ? parsed.users
+      : {};
+  db.autoReplies = Array.isArray(parsed.autoReplies) ? parsed.autoReplies : [];
+  db.conversations =
+    typeof parsed.conversations === "object" && parsed.conversations !== null
+      ? parsed.conversations
+      : {};
+  db.step =
+    typeof parsed.step === "object" && parsed.step !== null ? parsed.step : {};
+  db.messages =
+    typeof parsed.messages === "object" && parsed.messages !== null
+      ? parsed.messages
+      : {};
+  db.deletedLog = Array.isArray(parsed.deletedLog) ? parsed.deletedLog : [];
+  return db;
+}
+
 async function ensureDataFile() {
   try {
     if (!fsSync.existsSync(DATA_DIR)) {
@@ -50,81 +74,56 @@ async function ensureDataFile() {
       console.log("Created data directory:", DATA_DIR);
     }
     if (!fsSync.existsSync(DB_FILE)) {
-      await fs.writeFile(
-        DB_FILE,
-        JSON.stringify(
-          {
-            users: {},
-            autoReplies: [],
-            conversations: {},
-            step: {},
-            messages: {},
-            deletedLog: [],
-          },
-          null,
-          2
-        ),
-        "utf8"
-      );
+      const base = {
+        users: {},
+        autoReplies: [],
+        conversations: {},
+        step: {},
+        messages: {},
+        deletedLog: [],
+      };
+      await fs.writeFile(DB_FILE, JSON.stringify(base, null, 2), "utf8");
       console.log("Created DB file at:", DB_FILE);
     }
   } catch (e) {
-    console.error("Failed to ensure data file:", e);
+    console.error("Failed to ensure data file:", e?.message || e);
     process.exit(1);
   }
 }
 
-// -------------------- DB helpers --------------------
 async function loadDB() {
   try {
     const raw = await fs.readFile(DB_FILE, "utf8");
-    const parsed = JSON.parse(raw || "{}");
-
-    const users =
-      typeof parsed.users === "object" && parsed.users ? parsed.users : {};
-    const autoReplies = Array.isArray(parsed.autoReplies)
-      ? parsed.autoReplies
-      : [];
-    const conversations =
-      typeof parsed.conversations === "object" && parsed.conversations
-        ? parsed.conversations
-        : {};
-    const step =
-      typeof parsed.step === "object" && parsed.step !== null
-        ? parsed.step
-        : {};
-    const messages =
-      typeof parsed.messages === "object" && parsed.messages !== null
-        ? parsed.messages
-        : {};
-    const deletedLog = Array.isArray(parsed.deletedLog)
-      ? parsed.deletedLog
-      : [];
-
-    return { users, autoReplies, conversations, step, messages, deletedLog };
+    let parsed = {};
+    try {
+      parsed = raw ? JSON.parse(raw) : {};
+    } catch (e) {
+      console.warn(
+        "loadDB: JSON parse failed — will reinitialize DB.",
+        e?.message || e
+      );
+      parsed = {};
+    }
+    const normalized = normalizeDBShape(parsed);
+    return normalized;
   } catch (err) {
     console.warn(
       "loadDB: fayl o'qib bo'lmadi, yangi DB qaytarilmoqda.",
       err?.message || err
     );
-    return {
-      users: {},
-      autoReplies: [],
-      conversations: {},
-      step: {},
-      messages: {},
-      deletedLog: [],
-    };
+    return normalizeDBShape({});
   }
 }
 
-// Simple write queue to avoid concurrent writes (basic)
 let writeInProgress = false;
 let writeQueued = false;
 async function saveDB(db) {
+  // Normalize before saving to avoid accidental type regressions
+  const toSave = normalizeDBShape(db || {});
+
+  // simple write queue
   if (writeInProgress) {
     writeQueued = true;
-    // wait until previous write finishes (simple polling)
     while (writeInProgress) {
       // eslint-disable-next-line no-await-in-loop
       await new Promise((r) => setTimeout(r, 50));
@@ -132,17 +131,6 @@ async function saveDB(db) {
   }
   writeInProgress = true;
   try {
-    const toSave = {
-      users: db.users || {},
-      autoReplies: Array.isArray(db.autoReplies) ? db.autoReplies : [],
-      conversations: db.conversations || {},
-      step: typeof db.step === "object" && db.step !== null ? db.step : {},
-      messages:
-        typeof db.messages === "object" && db.messages !== null
-          ? db.messages
-          : {},
-      deletedLog: Array.isArray(db.deletedLog) ? db.deletedLog : [],
-    };
     await fs.writeFile(DB_FILE, JSON.stringify(toSave, null, 2), "utf8");
   } finally {
     writeInProgress = false;
@@ -150,6 +138,19 @@ async function saveDB(db) {
       writeQueued = false;
     }
   }
+}
+
+// Defensive helper used before mutating step/conversations
+function ensureMutableFields(db) {
+  if (typeof db !== "object" || db === null) return normalizeDBShape({});
+  if (typeof db.step !== "object" || db.step === null) db.step = {};
+  if (typeof db.users !== "object" || db.users === null) db.users = {};
+  if (!Array.isArray(db.autoReplies)) db.autoReplies = [];
+  if (typeof db.conversations !== "object" || db.conversations === null)
+    db.conversations = {};
+  if (typeof db.messages !== "object" || db.messages === null) db.messages = {};
+  if (!Array.isArray(db.deletedLog)) db.deletedLog = [];
+  return db;
 }
 
 // -------------------- Utilities --------------------
@@ -183,7 +184,6 @@ function personaFallback(role, userName = "Foydalanuvchi") {
   };
 }
 
-// Escape helper for HTML-only sends (avoid double-escaping when using entities)
 function escapeHtmlUnlessHtml(text, use_html) {
   if (!text) return "";
   if (use_html) return text;
@@ -215,7 +215,7 @@ async function retryRequest(fn, { retries = 2, delay = 700 } = {}) {
   }
 }
 
-// -------------------- Search & AI helpers (o'zgarmadi, lekin xatolarni yaxshiroq tutadi) --------------------
+// -------------------- Search & AI helpers --------------------
 async function serperSearch(q, opts = {}) {
   if (!SERPER_API_KEY) throw new Error("SERPER_API_KEY mavjud emas.");
   const url = "https://google.serper.dev/search";
@@ -345,7 +345,6 @@ async function generateAIResponse({ persona, userMessage, serperData }) {
   if (PREFERRED_AI) order.push(PREFERRED_AI);
   order.push("gemini", "openai", "cohere");
   const tried = new Set();
-  let lastError = null;
 
   for (const name of order) {
     if (!name) continue;
@@ -377,7 +376,6 @@ async function generateAIResponse({ persona, userMessage, serperData }) {
         return String(out).trim();
       }
     } catch (err) {
-      lastError = err;
       console.warn(
         `AI provider ${n} failed:`,
         err?.response?.data || err?.message || err
@@ -469,18 +467,6 @@ async function forwardToDeletedGroup(db, original) {
   }
 }
 
-// Choose entities over parse_mode HTML
-function sendOptionsForResponse(r) {
-  const opt = {};
-  if (r && r.entities) {
-    opt.entities = r.entities;
-  } else if (r && r.use_html) {
-    opt.parse_mode = "HTML";
-  }
-  return opt;
-}
-
-// Duplicate reply guard: returns true if allowed to send, and marks last reply
 async function canSendAndMark(
   db,
   chatId,
@@ -521,7 +507,6 @@ const backKeyboard = {
 // -------------------- Single update watcher (preview + delete detection) --------------------
 bot.on("update", async (ctx, next) => {
   try {
-    // Preview trimmed
     try {
       const preview = JSON.stringify(
         ctx.update || {},
@@ -537,13 +522,14 @@ bot.on("update", async (ctx, next) => {
       console.log("Incoming update (could not stringify):", typeof ctx.update);
     }
 
-    // Generic deletion detection (Telegram may deliver different shapes)
     const upd = ctx.update;
+    // Telegram does not always include a consistent delete shape; try multiple
     const deletedInfo =
+      upd?.message?.delete_chat_photo ||
+      upd?.edited_message?.delete_message ||
+      upd?.edited_message?.deleted ||
       upd?.message_deleted ||
       upd?.deleted_message ||
-      upd?.message?.deleted ||
-      upd?.delete_message ||
       null;
 
     if (deletedInfo) {
@@ -578,13 +564,12 @@ bot.on("update", async (ctx, next) => {
   return next();
 });
 
-// -------------------- Admin commands (unchanged logic but small safeties) --------------------
+// -------------------- Admin commands --------------------
 bot.start(async (ctx) => {
   const chatId = String(ctx.chat.id);
   if (chatId !== ADMIN_ID) return ctx.reply("Bu bot faqat admin uchun.");
   const db = await loadDB();
-  if (!Array.isArray(db.autoReplies)) db.autoReplies = [];
-  if (typeof db.step !== "object" || db.step === null) db.step = {};
+  ensureMutableFields(db);
   await saveDB(db);
   ctx.reply("Assalomu alaykum, admin. Tanlang:", mainKeyboard);
 });
@@ -592,8 +577,7 @@ bot.start(async (ctx) => {
 bot.hears("Add auto reply ✉️", async (ctx) => {
   if (String(ctx.chat.id) !== ADMIN_ID) return;
   const db = await loadDB();
-  if (!Array.isArray(db.autoReplies)) db.autoReplies = [];
-  if (typeof db.step !== "object" || db.step === null) db.step = {};
+  ensureMutableFields(db);
   db.step[ADMIN_ID] = { action: "add_trigger" };
   await saveDB(db);
   await ctx.reply(
@@ -605,6 +589,7 @@ bot.hears("Add auto reply ✉️", async (ctx) => {
 bot.hears("Remove auto reply 🚫", async (ctx) => {
   if (String(ctx.chat.id) !== ADMIN_ID) return;
   const db = await loadDB();
+  ensureMutableFields(db);
   if (!Array.isArray(db.autoReplies) || db.autoReplies.length === 0)
     return ctx.reply("Auto-reply ro'yxati bo'sh.", mainKeyboard);
 
@@ -613,7 +598,6 @@ bot.hears("Remove auto reply 🚫", async (ctx) => {
     list += `${i + 1}. ${r.trigger} (${(r.responses || []).length} javob)\n`;
   });
 
-  if (typeof db.step !== "object" || db.step === null) db.step = {};
   db.step[ADMIN_ID] = { action: "remove_choose" };
   await saveDB(db);
   await ctx.reply(
@@ -625,6 +609,7 @@ bot.hears("Remove auto reply 🚫", async (ctx) => {
 bot.hears("List auto replies 📋", async (ctx) => {
   if (String(ctx.chat.id) !== ADMIN_ID) return;
   const db = await loadDB();
+  ensureMutableFields(db);
   if (!Array.isArray(db.autoReplies) || db.autoReplies.length === 0)
     return ctx.reply("Auto-reply ro'yxati bo'sh.", mainKeyboard);
   let list = "Auto-replylar:\n\n";
@@ -638,20 +623,23 @@ bot.hears("Back 🔙", async (ctx) => {
   if (String(ctx.chat.id) !== ADMIN_ID)
     return ctx.reply("Bosh menyu", mainKeyboard);
   const db = await loadDB();
-  if (typeof db.step !== "object" || db.step === null) db.step = {};
-  db.step[ADMIN_ID] = null;
+  ensureMutableFields(db);
+  // remove step for admin to avoid storing null or wrong types
+  if (db.step && Object.prototype.hasOwnProperty.call(db.step, ADMIN_ID)) {
+    delete db.step[ADMIN_ID];
+  }
   await saveDB(db);
   return ctx.reply("Bosh menyu", mainKeyboard);
 });
 
 // -------------------- Main message handler (admin step + storage) --------------------
 bot.on("message", async (ctx) => {
-  // 1) Store incoming message snapshot for future (so we can forward if deleted)
   try {
     const incomingChatId = String(ctx.chat.id);
     const incomingMessageId = ctx.message?.message_id || ctx.message?.messageId;
     if (incomingMessageId) {
       const dbStore = await loadDB();
+      ensureMutableFields(dbStore);
       const meta = {
         chatId: incomingChatId,
         messageId: incomingMessageId,
@@ -665,7 +653,7 @@ bot.on("message", async (ctx) => {
         meta.text = ctx.message.text;
         meta.use_html =
           /^\/html\s+/i.test(ctx.message.text) ||
-          /<[/]?[biu]|<b>|<i>|<u>/.test(ctx.message.text);
+          /<\/?[biu]|<b>|<i>|<u>/.test(ctx.message.text);
         if (meta.use_html && /^\/html\s+/i.test(ctx.message.text)) {
           meta.text = ctx.message.text.replace(/^\/html\s+/i, "");
         }
@@ -682,12 +670,12 @@ bot.on("message", async (ctx) => {
         const photos = ctx.message.photo;
         meta.photoFileId = photos[photos.length - 1].file_id;
         meta.caption = ctx.message.caption || "";
-        meta.caption_html = /<[/]?[biu]|<b>|<i>|<u>/.test(meta.caption);
+        meta.caption_html = /<\/?[biu]|<b>|<i>|<u>/.test(meta.caption);
       }
       if (ctx.message.document) {
         meta.documentFileId = ctx.message.document.file_id;
         meta.caption = ctx.message.caption || "";
-        meta.caption_html = /<[/]?[biu]|<b>|<i>|<u>/.test(meta.caption);
+        meta.caption_html = /<\/?[biu]|<b>|<i>|<u>/.test(meta.caption);
       }
       if (ctx.message.sticker) meta.stickerFileId = ctx.message.sticker.file_id;
       if (ctx.message.voice) meta.voiceFileId = ctx.message.voice.file_id;
@@ -703,17 +691,15 @@ bot.on("message", async (ctx) => {
     console.warn("Failed to store incoming message:", e?.message || e);
   }
 
-  // 2) Admin step handling (add/remove auto replies)
+  // 2) Admin step handling
   try {
     const chatId = String(ctx.chat.id);
     const db = await loadDB();
-    if (!Array.isArray(db.autoReplies)) db.autoReplies = [];
-    if (typeof db.step !== "object" || db.step === null) db.step = {};
+    ensureMutableFields(db);
 
     const step = db.step[ADMIN_ID];
     const text = ctx.message?.text || "";
 
-    // add_trigger -> ask for responses
     if (chatId === ADMIN_ID && step?.action === "add_trigger") {
       const trigger = (text || "").trim();
       if (!trigger)
@@ -736,22 +722,25 @@ bot.on("message", async (ctx) => {
       );
     }
 
-    // add_response -> collect replies (text or media)
     if (chatId === ADMIN_ID && step?.action === "add_response") {
       const idx = step.index;
       if (!Number.isFinite(idx) || !db.autoReplies[idx]) {
-        db.step[ADMIN_ID] = null;
+        // reset admin step safely
+        if (db.step && Object.prototype.hasOwnProperty.call(db.step, ADMIN_ID))
+          delete db.step[ADMIN_ID];
         await saveDB(db);
         return ctx.reply("Xato indeks, qayta boshlang.", mainKeyboard);
       }
 
       if (text === "Done!") {
-        db.step[ADMIN_ID] = null;
+        if (db.step && Object.prototype.hasOwnProperty.call(db.step, ADMIN_ID))
+          delete db.step[ADMIN_ID];
         await saveDB(db);
         return ctx.reply("Auto-reply saqlandi.", mainKeyboard);
       }
       if (text === "Back 🔙") {
-        db.step[ADMIN_ID] = null;
+        if (db.step && Object.prototype.hasOwnProperty.call(db.step, ADMIN_ID))
+          delete db.step[ADMIN_ID];
         await saveDB(db);
         return ctx.reply("Bekor qilindi.", mainKeyboard);
       }
@@ -759,7 +748,7 @@ bot.on("message", async (ctx) => {
       // TEXT
       if (ctx.message.text) {
         const isHtmlByPrefix = /^\/html\s+/i.test(ctx.message.text);
-        const isHtmlByTags = /<[/]?[biu]|<b>|<i>|<u>/.test(ctx.message.text);
+        const isHtmlByTags = /<\/?[biu]|<b>|<i>|<u>/.test(ctx.message.text);
         let content = ctx.message.text;
         let use_html = false;
         if (isHtmlByPrefix) {
@@ -785,7 +774,7 @@ bot.on("message", async (ctx) => {
         const photos = ctx.message.photo;
         const fileId = photos[photos.length - 1].file_id;
         const caption = ctx.message.caption || "";
-        const caption_html = /<[/]?[biu]|<b>|<i>|<u>/.test(caption);
+        const caption_html = /<\/?[biu]|<b>|<i>|<u>/.test(caption);
         db.autoReplies[idx].responses.push({
           type: "photo",
           fileId,
@@ -800,7 +789,7 @@ bot.on("message", async (ctx) => {
       if (ctx.message.document) {
         const fileId = ctx.message.document.file_id;
         const caption = ctx.message.caption || "";
-        const caption_html = /<[/]?[biu]|<b>|<i>|<u>/.test(caption);
+        const caption_html = /<\/?[biu]|<b>|<i>|<u>/.test(caption);
         db.autoReplies[idx].responses.push({
           type: "document",
           fileId,
@@ -835,13 +824,14 @@ bot.on("message", async (ctx) => {
       );
     }
 
-    // remove_choose
     if (chatId === ADMIN_ID && step?.action === "remove_choose") {
       const n = parseInt(text, 10);
-      if (Number.isNaN(n) || n < 1 || n > (db.autoReplies || []).length)
+      const listLen = Array.isArray(db.autoReplies) ? db.autoReplies.length : 0;
+      if (Number.isNaN(n) || n < 1 || n > listLen)
         return ctx.reply("Noto'g'ri raqam.");
       db.autoReplies.splice(n - 1, 1);
-      db.step[ADMIN_ID] = null;
+      if (db.step && Object.prototype.hasOwnProperty.call(db.step, ADMIN_ID))
+        delete db.step[ADMIN_ID];
       await saveDB(db);
       return ctx.reply("O'chirildi.", mainKeyboard);
     }
@@ -875,16 +865,14 @@ bot.on("business_message", async (ctx) => {
       return;
     }
 
-    // Skip auto-replies/triggers for admin's own messages
     if (String(msg.from?.id) === ADMIN_ID) {
       console.log("Skipping business auto-reply because sender is ADMIN.");
       return;
     }
 
     const db = await loadDB();
-    if (!Array.isArray(db.autoReplies)) db.autoReplies = [];
+    ensureMutableFields(db);
 
-    // store incoming business message snapshot
     try {
       const meta = {
         chatId,
@@ -894,7 +882,7 @@ bot.on("business_message", async (ctx) => {
         date: msg.date || Math.floor(Date.now() / 1000),
         text,
         use_html:
-          /^\/html\s+/i.test(text) || /<[/]?[biu]|<b>|<i>|<u>/.test(text),
+          /^\/html\s+/i.test(text) || /<\/?[biu]|<b>|<i>|<u>/.test(text),
       };
       if (msg.entities) meta.entities = msg.entities;
       if (meta.use_html && /^\/html\s+/i.test(text))
@@ -904,7 +892,6 @@ bot.on("business_message", async (ctx) => {
       console.warn("store business message failed:", e?.message || e);
     }
 
-    // auto replies
     const lower = (text || "").toLowerCase();
     for (const reply of db.autoReplies || []) {
       if (
@@ -916,14 +903,12 @@ bot.on("business_message", async (ctx) => {
         );
         for (const r of reply.responses || []) {
           try {
-            // build send options carefully: prefer entities over parse_mode
             const sendOpts = {
               business_connection_id: businessId,
               ...(r.entities ? { entities: r.entities } : {}),
               ...(!r.entities && r.use_html ? { parse_mode: "HTML" } : {}),
             };
 
-            // Duplicate guard: avoid sending same reply repeatedly
             const allowed = await canSendAndMark(
               db,
               chatId,
@@ -988,7 +973,6 @@ bot.on("business_message", async (ctx) => {
       }
     }
 
-    // If no auto-reply -> AI fallback or persona reply
     let serperData = null;
     try {
       if (SERPER_API_KEY && text) serperData = await serperSearch(text);
@@ -1010,7 +994,6 @@ bot.on("business_message", async (ctx) => {
     });
 
     try {
-      // Duplicate guard for AI reply
       const allowed = await canSendAndMark(db, chatId, replyText, true);
       if (!allowed) {
         console.log("Skipping duplicate AI reply (business) for", chatId);
@@ -1020,9 +1003,7 @@ bot.on("business_message", async (ctx) => {
       await ctx.telegram.sendMessage(
         chatId,
         escapeHtmlUnlessHtml(replyText, false),
-        {
-          business_connection_id: businessId,
-        }
+        { business_connection_id: businessId }
       );
       console.log("Sent AI business reply to", chatId);
     } catch (e) {
@@ -1042,10 +1023,8 @@ bot.on("business_message", async (ctx) => {
 // -------------------- Fallback message responder for normal chats --------------------
 bot.on("text", async (ctx) => {
   try {
-    // Guard: ignore bot messages
     if (!ctx.message || (ctx.message.from && ctx.message.from.is_bot)) return;
 
-    // Skip auto-replies for admin messages (admin uses special flows)
     if (String(ctx.message.from?.id) === ADMIN_ID) {
       console.log(
         "Message from ADMIN received in text handler — skipping auto-reply here."
@@ -1059,7 +1038,7 @@ bot.on("text", async (ctx) => {
     const text = msg.text || "";
 
     const db = await loadDB();
-    if (!Array.isArray(db.autoReplies)) db.autoReplies = [];
+    ensureMutableFields(db);
 
     const lower = text.toLowerCase();
 
@@ -1082,7 +1061,6 @@ bot.on("text", async (ctx) => {
               ...(r.use_html && !r.entities ? { parse_mode: "HTML" } : {}),
             };
 
-            // Duplicate guard
             const allowed = await canSendAndMark(
               db,
               chatId,
@@ -1141,11 +1119,10 @@ bot.on("text", async (ctx) => {
             );
           }
         }
-        return; // handled
+        return;
       }
     }
 
-    // If no auto-reply: AI fallback or persona reply
     let serperData = null;
     try {
       if (SERPER_API_KEY && text) serperData = await serperSearch(text);
@@ -1166,7 +1143,6 @@ bot.on("text", async (ctx) => {
       serperData,
     });
 
-    // Duplicate guard for AI reply
     const allowed = await canSendAndMark(db, chatId, replyText, true);
     if (!allowed) {
       const fallback =
@@ -1202,32 +1178,27 @@ bot.on("text", async (ctx) => {
 // -------------------- HTTP server (health + basic) --------------------
 const app = express();
 app.use(express.json());
+app.get("/", (req, res) =>
+  res.send("Bot ishga tushgan. /health ni ping qiling.")
+);
+app.get("/health", (req, res) => res.json({ ok: true, ts: Date.now() }));
 
-app.get("/", (req, res) => {
-  res.send("Bot ishga tushgan. /health ni ping qiling.");
-});
-
-app.get("/health", (req, res) => {
-  // oddiy health-check: 200 OK
-  res.json({ ok: true, ts: Date.now() });
-});
-
-// Port Render/Heroku kabi platformalarda beriladi
 const PORT = parseInt(process.env.PORT || "3000", 10);
 
-// Start both bot and HTTP server
 (async () => {
   try {
     await ensureDataFile();
 
-    // dropPendingUpdates yordamida eski update'larni iste'mol qilmaymiz — bu boshlang'ich holatda foydali
-    await bot.launch({ dropPendingUpdates: true });
-    app.listen(PORT, () => {
-      console.log(`✅ Bot ishga tushdi (Telegraf). HTTP server port ${PORT}`);
-      console.log(`Health: http://localhost:${PORT}/health`);
+    await bot.launch({ dropPendingUpdates: true }).catch((e) => {
+      console.error("bot.launch failed:", e?.message || e);
+      throw e;
     });
 
-    // Self-ping (faqat agar URL berilgan bo'lsa)
+    app.listen(PORT, () => {
+      console.log(`✅ Bot ishga tushdi (Telegraf). HTTP server port ${PORT}`);
+      console.log(`Health endpoint: http://localhost:${PORT}/health`);
+    });
+
     if (ENABLE_SELF_PING && SELF_PING_URL) {
       console.log("Self-ping yoqildi. URL =", SELF_PING_URL);
       setInterval(async () => {
@@ -1237,14 +1208,13 @@ const PORT = parseInt(process.env.PORT || "3000", 10);
         } catch (e) {
           console.warn("Self-ping failed:", e?.message || e);
         }
-      }, Math.max(60000, SELF_PING_INTERVAL_MS)); // kamida 60s
+      }, Math.max(60000, SELF_PING_INTERVAL_MS));
     } else if (ENABLE_SELF_PING) {
       console.warn(
         "ENABLE_SELF_PING true, ammo SELF_PING_URL aniqlanmagan. Self-ping ishlamaydi."
       );
     }
 
-    // Graceful shutdown
     const shutdown = async (sig) => {
       console.log(`📴 Received ${sig}, stopping bot...`);
       try {
@@ -1264,7 +1234,6 @@ const PORT = parseInt(process.env.PORT || "3000", 10);
   }
 })();
 
-// -------------------- Graceful error handlers --------------------
 bot.catch((err) => {
   console.error("Bot catch:", err);
 });
