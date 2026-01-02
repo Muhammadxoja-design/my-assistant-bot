@@ -1,13 +1,16 @@
-// index.js
+// index.js — yangilangan va takomillashtirilgan versiya
 import { Telegraf } from "telegraf";
 import axios from "axios";
 import fs from "fs/promises";
+import fsSync from "fs";
 import path from "path";
 import "dotenv/config";
+import express from "express";
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const ADMIN_ID = process.env.ADMIN_ID && process.env.ADMIN_ID.toString();
-const DB_FILE = path.resolve(process.cwd(), "db.json");
+const BOT_TOKEN = process.env.BOT_TOKEN || "";
+const ADMIN_ID = (process.env.ADMIN_ID || "").toString();
+const DATA_DIR = path.resolve(process.cwd(), "data");
+const DB_FILE = path.resolve(DATA_DIR, "db.json");
 
 const SERPER_API_KEY = process.env.SERPER_API_KEY || "";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
@@ -19,11 +22,17 @@ const DELETED_GROUP_ID = process.env.DELETED_GROUP_ID
   ? process.env.DELETED_GROUP_ID.toString()
   : "";
 const AI_ENABLED = process.env.AI_ENABLED === "true";
+const ENABLE_SELF_PING = process.env.ENABLE_SELF_PING === "true";
+const SELF_PING_URL = process.env.SELF_PING_URL || ""; // <-- set to your public URL (e.g. https://my-service.onrender.com/health)
+const SELF_PING_INTERVAL_MS = parseInt(
+  process.env.SELF_PING_INTERVAL_MS || "240000",
+  10
+); // default 4 min
 
 // Basic env check
 if (!BOT_TOKEN || !ADMIN_ID) {
   console.error(
-    "BOT_TOKEN va ADMIN_ID .env da belgilanmagan. Iltimos to'ldiring."
+    "❌ BOT_TOKEN va ADMIN_ID .env da belgilanmagan. Iltimos to'ldiring."
   );
   process.exit(1);
 }
@@ -33,11 +42,43 @@ console.log("AI_ENABLED =", AI_ENABLED);
 
 const bot = new Telegraf(BOT_TOKEN);
 
+// Ensure data directory & DB file exist
+async function ensureDataFile() {
+  try {
+    if (!fsSync.existsSync(DATA_DIR)) {
+      await fs.mkdir(DATA_DIR, { recursive: true });
+      console.log("Created data directory:", DATA_DIR);
+    }
+    if (!fsSync.existsSync(DB_FILE)) {
+      await fs.writeFile(
+        DB_FILE,
+        JSON.stringify(
+          {
+            users: {},
+            autoReplies: [],
+            conversations: {},
+            step: {},
+            messages: {},
+            deletedLog: [],
+          },
+          null,
+          2
+        ),
+        "utf8"
+      );
+      console.log("Created DB file at:", DB_FILE);
+    }
+  } catch (e) {
+    console.error("Failed to ensure data file:", e);
+    process.exit(1);
+  }
+}
+
 // -------------------- DB helpers --------------------
 async function loadDB() {
   try {
     const raw = await fs.readFile(DB_FILE, "utf8");
-    const parsed = JSON.parse(raw);
+    const parsed = JSON.parse(raw || "{}");
 
     const users =
       typeof parsed.users === "object" && parsed.users ? parsed.users : {};
@@ -62,6 +103,10 @@ async function loadDB() {
 
     return { users, autoReplies, conversations, step, messages, deletedLog };
   } catch (err) {
+    console.warn(
+      "loadDB: fayl o'qib bo'lmadi, yangi DB qaytarilmoqda.",
+      err?.message || err
+    );
     return {
       users: {},
       autoReplies: [],
@@ -73,19 +118,38 @@ async function loadDB() {
   }
 }
 
+// Simple write queue to avoid concurrent writes (basic)
+let writeInProgress = false;
+let writeQueued = false;
 async function saveDB(db) {
-  const toSave = {
-    users: db.users || {},
-    autoReplies: Array.isArray(db.autoReplies) ? db.autoReplies : [],
-    conversations: db.conversations || {},
-    step: typeof db.step === "object" && db.step !== null ? db.step : {},
-    messages:
-      typeof db.messages === "object" && db.messages !== null
-        ? db.messages
-        : {},
-    deletedLog: Array.isArray(db.deletedLog) ? db.deletedLog : [],
-  };
-  await fs.writeFile(DB_FILE, JSON.stringify(toSave, null, 2), "utf8");
+  if (writeInProgress) {
+    writeQueued = true;
+    // wait until previous write finishes (simple polling)
+    while (writeInProgress) {
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+  writeInProgress = true;
+  try {
+    const toSave = {
+      users: db.users || {},
+      autoReplies: Array.isArray(db.autoReplies) ? db.autoReplies : [],
+      conversations: db.conversations || {},
+      step: typeof db.step === "object" && db.step !== null ? db.step : {},
+      messages:
+        typeof db.messages === "object" && db.messages !== null
+          ? db.messages
+          : {},
+      deletedLog: Array.isArray(db.deletedLog) ? db.deletedLog : [],
+    };
+    await fs.writeFile(DB_FILE, JSON.stringify(toSave, null, 2), "utf8");
+  } finally {
+    writeInProgress = false;
+    if (writeQueued) {
+      writeQueued = false;
+    }
+  }
 }
 
 // -------------------- Utilities --------------------
@@ -145,12 +209,13 @@ async function retryRequest(fn, { retries = 2, delay = 700 } = {}) {
       console.warn(
         `Retry #${i} after error: ${err?.message || err}. waiting ${wait}ms`
       );
+      // eslint-disable-next-line no-await-in-loop
       await new Promise((res) => setTimeout(res, wait));
     }
   }
 }
 
-// -------------------- Search & AI helpers --------------------
+// -------------------- Search & AI helpers (o'zgarmadi, lekin xatolarni yaxshiroq tutadi) --------------------
 async function serperSearch(q, opts = {}) {
   if (!SERPER_API_KEY) throw new Error("SERPER_API_KEY mavjud emas.");
   const url = "https://google.serper.dev/search";
@@ -261,7 +326,6 @@ function buildGenPrompt({ persona, userMessage, searchResults = [] }) {
 }
 
 async function generateAIResponse({ persona, userMessage, serperData }) {
-  // if AI disabled, don't call providers at all
   if (!AI_ENABLED) {
     return (
       persona?.sample_first_message ||
@@ -368,14 +432,12 @@ async function forwardToDeletedGroup(db, original) {
         original.use_html ? { parse_mode: "HTML" } : {}
       );
     }
-
     if (original.photoFileId) {
       await bot.telegram.sendPhoto(DELETED_GROUP_ID, original.photoFileId, {
         caption: header + (original.caption || ""),
         parse_mode: original.caption_html ? "HTML" : undefined,
       });
     }
-
     if (original.documentFileId) {
       await bot.telegram.sendDocument(
         DELETED_GROUP_ID,
@@ -386,11 +448,9 @@ async function forwardToDeletedGroup(db, original) {
         }
       );
     }
-
     if (original.stickerFileId) {
       await bot.telegram.sendSticker(DELETED_GROUP_ID, original.stickerFileId);
     }
-
     if (original.voiceFileId) {
       await bot.telegram.sendVoice(DELETED_GROUP_ID, original.voiceFileId, {
         caption: header + (original.caption || ""),
@@ -458,26 +518,67 @@ const backKeyboard = {
   reply_markup: { keyboard: [["Back 🔙"]], resize_keyboard: true },
 };
 
-// -------------------- Debug: incoming update preview --------------------
+// -------------------- Single update watcher (preview + delete detection) --------------------
 bot.on("update", async (ctx, next) => {
   try {
-    const preview = JSON.stringify(
-      ctx.update || {},
-      (k, v) => {
-        if (k === "photo" || k === "file_size" || k === "thumb")
-          return undefined;
-        return v;
-      },
-      2
-    ).slice(0, 1600);
-    console.log("Incoming update preview:", preview);
+    // Preview trimmed
+    try {
+      const preview = JSON.stringify(
+        ctx.update || {},
+        (k, v) => {
+          if (k === "photo" || k === "file_size" || k === "thumb")
+            return undefined;
+          return v;
+        },
+        2
+      ).slice(0, 1600);
+      console.log("Incoming update preview:", preview);
+    } catch (e) {
+      console.log("Incoming update (could not stringify):", typeof ctx.update);
+    }
+
+    // Generic deletion detection (Telegram may deliver different shapes)
+    const upd = ctx.update;
+    const deletedInfo =
+      upd?.message_deleted ||
+      upd?.deleted_message ||
+      upd?.message?.deleted ||
+      upd?.delete_message ||
+      null;
+
+    if (deletedInfo) {
+      const chatId = String(
+        deletedInfo.chat_id || deletedInfo.chatId || deletedInfo.chat?.id
+      );
+      const messageId = String(
+        deletedInfo.message_id ||
+          deletedInfo.messageId ||
+          deletedInfo.message?.message_id
+      );
+      if (chatId && messageId) {
+        const db = await loadDB();
+        const saved = db.messages?.[chatId]?.[messageId];
+        if (saved) {
+          await forwardToDeletedGroup(db, saved);
+          saved.deleted_at = Date.now();
+          saved.deleted_by = deletedInfo.who_deleted || null;
+          await saveDB(db);
+        } else {
+          console.log(
+            "Deletion event received but no saved snapshot found for",
+            chatId,
+            messageId
+          );
+        }
+      }
+    }
   } catch (e) {
-    console.log("Incoming update (could not stringify):", typeof ctx.update);
+    console.warn("Update watcher error:", e?.message || e);
   }
   return next();
 });
 
-// -------------------- Admin commands --------------------
+// -------------------- Admin commands (unchanged logic but small safeties) --------------------
 bot.start(async (ctx) => {
   const chatId = String(ctx.chat.id);
   if (chatId !== ADMIN_ID) return ctx.reply("Bu bot faqat admin uchun.");
@@ -570,7 +671,6 @@ bot.on("message", async (ctx) => {
         }
       }
 
-      // store entities if present (for premium emoji)
       if (
         Array.isArray(ctx.message.entities) &&
         ctx.message.entities.length > 0
@@ -939,48 +1039,6 @@ bot.on("business_message", async (ctx) => {
   }
 });
 
-// -------------------- Generic update watcher (deleted message detection) --------------------
-bot.on("update", async (ctx) => {
-  try {
-    const upd = ctx.update;
-    const deletedInfo =
-      upd?.message_deleted ||
-      upd?.deleted_message ||
-      upd?.message?.deleted ||
-      upd?.delete_message ||
-      null;
-
-    if (deletedInfo) {
-      const chatId = String(
-        deletedInfo.chat_id || deletedInfo.chatId || deletedInfo.chat?.id
-      );
-      const messageId = String(
-        deletedInfo.message_id ||
-          deletedInfo.messageId ||
-          deletedInfo.message?.message_id
-      );
-      if (chatId && messageId) {
-        const db = await loadDB();
-        const saved = db.messages?.[chatId]?.[messageId];
-        if (saved) {
-          await forwardToDeletedGroup(db, saved);
-          saved.deleted_at = Date.now();
-          saved.deleted_by = deletedInfo.who_deleted || null;
-          await saveDB(db);
-        } else {
-          console.log(
-            "Deletion event received but no saved snapshot found for",
-            chatId,
-            messageId
-          );
-        }
-      }
-    }
-  } catch (e) {
-    console.warn("Deletion watcher error:", e?.message || e);
-  }
-});
-
 // -------------------- Fallback message responder for normal chats --------------------
 bot.on("text", async (ctx) => {
   try {
@@ -1141,6 +1199,71 @@ bot.on("text", async (ctx) => {
   }
 });
 
+// -------------------- HTTP server (health + basic) --------------------
+const app = express();
+app.use(express.json());
+
+app.get("/", (req, res) => {
+  res.send("Bot ishga tushgan. /health ni ping qiling.");
+});
+
+app.get("/health", (req, res) => {
+  // oddiy health-check: 200 OK
+  res.json({ ok: true, ts: Date.now() });
+});
+
+// Port Render/Heroku kabi platformalarda beriladi
+const PORT = parseInt(process.env.PORT || "3000", 10);
+
+// Start both bot and HTTP server
+(async () => {
+  try {
+    await ensureDataFile();
+
+    // dropPendingUpdates yordamida eski update'larni iste'mol qilmaymiz — bu boshlang'ich holatda foydali
+    await bot.launch({ dropPendingUpdates: true });
+    app.listen(PORT, () => {
+      console.log(`✅ Bot ishga tushdi (Telegraf). HTTP server port ${PORT}`);
+      console.log(`Health: http://localhost:${PORT}/health`);
+    });
+
+    // Self-ping (faqat agar URL berilgan bo'lsa)
+    if (ENABLE_SELF_PING && SELF_PING_URL) {
+      console.log("Self-ping yoqildi. URL =", SELF_PING_URL);
+      setInterval(async () => {
+        try {
+          await axios.get(SELF_PING_URL, { timeout: 8000 });
+          console.log(`Self-ping ok -> ${SELF_PING_URL}`);
+        } catch (e) {
+          console.warn("Self-ping failed:", e?.message || e);
+        }
+      }, Math.max(60000, SELF_PING_INTERVAL_MS)); // kamida 60s
+    } else if (ENABLE_SELF_PING) {
+      console.warn(
+        "ENABLE_SELF_PING true, ammo SELF_PING_URL aniqlanmagan. Self-ping ishlamaydi."
+      );
+    }
+
+    // Graceful shutdown
+    const shutdown = async (sig) => {
+      console.log(`📴 Received ${sig}, stopping bot...`);
+      try {
+        await bot.stop();
+        console.log("Bot stopped.");
+      } catch (e) {
+        console.warn("Error stopping bot:", e?.message || e);
+      } finally {
+        process.exit(0);
+      }
+    };
+    process.once("SIGINT", () => shutdown("SIGINT"));
+    process.once("SIGTERM", () => shutdown("SIGTERM"));
+  } catch (err) {
+    console.error("❌ Bot ishga tushmadi:", err);
+    process.exit(1);
+  }
+})();
+
 // -------------------- Graceful error handlers --------------------
 bot.catch((err) => {
   console.error("Bot catch:", err);
@@ -1152,13 +1275,3 @@ process.on("uncaughtException", (e) => {
   console.error("uncaughtException:", e);
   process.exit(1);
 });
-
-// -------------------- Start bot --------------------
-(async () => {
-  try {
-    await bot.launch();
-    console.log("✅ Bot ishga tushdi (Telegraf)");
-  } catch (err) {
-    console.error("❌ Bot ishga tushmadi:", err);
-  }
-})();
