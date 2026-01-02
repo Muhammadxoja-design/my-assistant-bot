@@ -322,7 +322,7 @@ function buildGenPrompt({ persona, userMessage, searchResults = [] }) {
   const personaNote = persona
     ? `Persona tone: ${persona.tone}. Style: ${persona.style}. Avoid: ${persona.doNotReveal}`
     : "";
-  return `Siz professional yordamchisiz. ${personaNote}\n\nFoydalanuvchi so'rovi:\n"${userMessage}"\n\nKontekst (qidiruv):\n${top}\n\nIltimos, 1-3 jumla ichida qisqa, aniq javob bering va kerak bo'lsa URL manzilga ishora qiling. Oxirida qo'shing: (Bu javob bot tomonidan yaratilgan.)`;
+  return `Siz professional yordamchisiz. ${personaNote}\n\nFoydalanuvchi so'rovi:\n"${userMessage}"\n\nKontekst (qidiruv):\n${top}\n\nIltimos, 1-3 jumla ichida qisqa, aniq javob bering va kerak bo'lsa URL manzilga ishora qiling. Oxirida qo'shing: Ushbu javob Muhammadxojaning avtomatlashtirilgan tizim (bot) tomonidan yuborildi.`;
 }
 
 async function generateAIResponse({ persona, userMessage, serperData }) {
@@ -388,7 +388,7 @@ async function generateAIResponse({ persona, userMessage, serperData }) {
       .slice(0, 3)
       .map((r, i) => `${i + 1}. ${r.title}\n${r.link}\n${r.snippet}`)
       .join("\n\n");
-    return `🔎 Top natijalar:\n\n${top}\n\n(Bu javob bot tomonidan yaratilgan.)`;
+    return `🔎 Top natijalar:\n\n${top}\n\nUshbu javob Muhammadxojaning avtomatlashtirilgan tizim (bot) tomonidan yuborildi.`;
   }
 
   return (
