@@ -1,0 +1,30 @@
+{
+  "name": "muhammadxoja-assistant-v2",
+  "version": "1.0.0",
+  "description": "Muhammadxoja's bot",
+  "keywords": [
+    "Muhammaxoja",
+    "TelegramBot",
+    "buiznesBot",
+    "Chatbot"
+  ],
+  "license": "ISC",
+  "author": "Muhammaxoja",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "test": "Hello World",
+    "dev": "nodemon index.js",
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "axios": "^1.13.2",
+    "dotenv": "^17.2.3",
+    "fs": "^0.0.1-security",
+    "node-telegram-bot-api": "^0.67.0",
+    "nodemon": "^3.1.11",
+    "os": "^0.1.2",
+    "path": "^0.12.7",
+    "telegraf": "^4.16.3"
+  }
+}
