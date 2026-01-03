@@ -1315,11 +1315,23 @@ bot.on("text", async (ctx) => {
 // -------------------- HTTP server (health + basic) --------------------
 const app = express();
 app.use(express.json());
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+const HOST = process.env.HOST || "0.0.0.0";
+
 app.get("/", (req, res) =>
   res.send("Bot ishga tushgan. /health ni ping qiling.")
 );
 app.get("/health", (req, res) => res.json({ ok: true, ts: Date.now() }));
-const PORT = parseInt(process.env.PORT || "3000", 10);
+
+// Debug: log env to help Render troubleshooting
+console.log("NODE_ENV:", process.env.NODE_ENV);
+console.log("Process PORT env:", process.env.PORT);
+console.log("Binding server to:", HOST, "port:", PORT);
+
+// Start HTTP server *before* bot.launch so Render sees open port ASAP
+const server = app.listen(PORT, HOST, () => {
+  console.log(`✅ HTTP server listening on http://${HOST}:${PORT}/health`);
+});
 (async () => {
   try {
     await ensureDataFile();
