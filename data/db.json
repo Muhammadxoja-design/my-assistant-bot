@@ -1,8 +1,151 @@
 {
   "users": {},
-  "autoReplies": [],
-  "conversations": {},
+  "autoReplies": [
+    {
+      "trigger": "salom",
+      "responses": [
+        {
+          "type": "text",
+          "content": "Assalomu Alaykum! 😉",
+          "use_html": false,
+          "entities": [
+            {
+              "offset": 18,
+              "length": 2,
+              "type": "custom_emoji",
+              "custom_emoji_id": "5305253958908919472"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "conversations": {
+    "6212159199": {
+      "lastBotReply": {
+        "text": "Assalomu alaykum, qanday savolingiz bor?",
+        "at": 1767430225187
+      }
+    },
+    "7672729671": {
+      "lastBotReply": {
+        "text": "Assalomu Alaykum! 😉",
+        "at": 1767430476403
+      }
+    }
+  },
   "step": {},
-  "messages": {},
-  "deletedLog": []
+  "messages": {
+    "6212159199": {
+      "30178": {
+        "saved_at": 1767429507605,
+        "chatId": "6212159199",
+        "messageId": 30178,
+        "fromId": 6212159199,
+        "fromName": "Iqboljon",
+        "date": 1767429506,
+        "text": "нима гап углим",
+        "use_html": false
+      },
+      "30180": {
+        "saved_at": 1767429511022,
+        "chatId": "6212159199",
+        "messageId": 30180,
+        "fromId": 6212159199,
+        "fromName": "Iqboljon",
+        "date": 1767429510,
+        "text": "🤨",
+        "use_html": false
+      },
+      "30184": {
+        "saved_at": 1767430223849,
+        "chatId": "6212159199",
+        "messageId": 30184,
+        "fromId": 6212159199,
+        "fromName": "Iqboljon",
+        "date": 1767429668,
+        "text": "ии",
+        "use_html": false
+      }
+    },
+    "6813216374": {
+      "895": {
+        "saved_at": 1767430272213,
+        "chatId": "6813216374",
+        "messageId": 895,
+        "fromId": 6813216374,
+        "fromName": "Muhammadxo'ja | Dasturchi",
+        "date": 1767430271,
+        "text": "salom",
+        "use_html": false
+      },
+      "897": {
+        "saved_at": 1767430321330,
+        "chatId": "6813216374",
+        "messageId": 897,
+        "fromId": 6813216374,
+        "fromName": "Muhammadxo'ja | Dasturchi",
+        "date": 1767430320,
+        "text": "Assalomu Alaykum! 😉",
+        "use_html": false,
+        "entities": [
+          {
+            "offset": 18,
+            "length": 2,
+            "type": "custom_emoji",
+            "custom_emoji_id": "5305253958908919472"
+          }
+        ]
+      }
+    },
+    "7672729671": {
+      "30200": {
+        "saved_at": 1767430415391,
+        "chatId": "7672729671",
+        "messageId": 30200,
+        "fromId": 7672729671,
+        "fromName": "🌌",
+        "date": 1767430414,
+        "text": "saom",
+        "use_html": false
+      },
+      "30201": {
+        "saved_at": 1767430423803,
+        "chatId": "7672729671",
+        "messageId": 30201,
+        "fromId": 7672729671,
+        "fromName": "🌌",
+        "date": 1767430416,
+        "text": "salom",
+        "use_html": false
+      },
+      "30204": {
+        "saved_at": 1767430465099,
+        "chatId": "7672729671",
+        "messageId": 30204,
+        "fromId": 7672729671,
+        "fromName": "🌌",
+        "date": 1767430462,
+        "text": "sallom",
+        "use_html": false
+      },
+      "30206": {
+        "saved_at": 1767430476394,
+        "chatId": "7672729671",
+        "messageId": 30206,
+        "fromId": 7672729671,
+        "fromName": "🌌",
+        "date": 1767430474,
+        "text": "salom",
+        "use_html": false
+      }
+    }
+  },
+  "deletedLog": [
+    {
+      "archived_at": 1767430237797,
+      "archived_autoReplies": []
+    }
+  ],
+  "settings": {}
 }
